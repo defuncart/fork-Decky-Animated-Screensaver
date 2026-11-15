@@ -17,7 +17,7 @@ from uuid import uuid4
 from das.core.catalog import ScreensaverError, atomic_json, file_sha256
 from das.core.process_guard import failure_snapshot
 from das.core.jobs import _safe_asset, rank_assets
-from das.library import installed_games
+from das.library import installed_games, shortcut_games
 from das.provider import API_BASE, HERO_DIMENSIONS, _trusted_url, _source_extension
 from .membership import included as selected_game
 from .storage import Store, component, crop, read_object
@@ -78,10 +78,12 @@ class CandidateCache(dict):
         with self.guard:self.times.clear();super().clear()
 
 class StudioService:
-    def __init__(self,root,steamgriddb=None,current_game=None,games_provider=None,media=None,event_callback=None,legacy=None):
+    def __init__(self,root,steamgriddb=None,current_game=None,games_provider=None,media=None,event_callback=None,legacy=None,shortcuts_provider=None):
         self.catalog=Store(root,legacy); self.root=self.catalog.root; self.lock=threading.RLock()
         self.provider=steamgriddb; self.current_game=current_game or (lambda:{})
-        self.games_provider=games_provider or installed_games; self.compiler=media or Media()
+        self.games_provider=games_provider or installed_games
+        # A custom games_provider (tests, embedders) opts out of reading the real shortcuts.vdf.
+        self.shortcuts_provider=shortcuts_provider or (shortcut_games if games_provider is None else (lambda:[])); self._shortcut_misses=set(); self.compiler=media or Media()
         self.event_callback=event_callback; self.thread=None; self.closed=False; self.cancelled=threading.Event()
         self._api_lock=threading.Lock(); self._api_at=0.; self._candidates=CandidateCache(); self._scanned=False
         self._pending_work=None; self.after_prepare=None; self.last_cleanup=None
@@ -178,8 +180,52 @@ class StudioService:
                 entry=self.catalog.data['games'].setdefault(str(number),dict(appid=number,status='pending',excluded=not include_new,manual=False))
                 entry.update(name=str(game['name'])[:160],installed=True)
             self.catalog.save()
+        self._merge_shortcuts()
         self._scanned=True; self._measure_usage()
         return self.status()
+
+    SHORTCUT_LOOKUPS_PER_SCAN=20
+
+    def _resolve_shortcut(self,name):
+        """Best SteamGridDB match for a non-Steam shortcut name, or None."""
+        name=' '.join(str(name).split())
+        if len(name)<2: return None
+        rows=self._request(lambda:self.provider._json_request(API_BASE+'/search/autocomplete/'+quote(name,safe=''))).get('data',[])
+        for g in rows[:1] if isinstance(rows,list) else []:
+            if isinstance(g,dict) and type(g.get('id')) is int and g['id']>0: return g['id']
+        return None
+
+    def _merge_shortcuts(self):
+        """Add non-Steam shortcuts as ``-sgdb_id`` entries tagged ``origin='shortcut'``.
+
+        A shortcut's own id is kept as ``shortcut_id``; a match already stored for it is reused,
+        so SteamGridDB is only asked about shortcuts we have not matched yet.
+        """
+        try: shortcuts=self.shortcuts_provider()
+        except Exception: return
+        if not shortcuts: return
+        lookups=0
+        for shortcut in shortcuts:
+            number=shortcut['shortcut_id']; name=str(shortcut['name'])[:160]
+            with self.catalog.lock:
+                known=next((k for k,e in self.catalog.data['games'].items() if e.get('shortcut_id')==number),None)
+                if known is None and (number in self._shortcut_misses or lookups>=self.SHORTCUT_LOOKUPS_PER_SCAN): continue
+            if known is None:
+                lookups+=1
+                try: sgdb_id=self._resolve_shortcut(name)
+                except ScreensaverError as error:
+                    # No key, offline or rate limited: stop asking this scan; the next scan retries.
+                    break
+                if not sgdb_id: self._shortcut_misses.add(number); continue
+                known=str(-sgdb_id)
+            with self.catalog.lock:
+                games=self.catalog.data['games']
+                owner=games.get(known)
+                if owner is not None and owner.get('shortcut_id') not in (None,number): continue  # two shortcuts, one match: keep the first
+                if owner is None:
+                    owner=games.setdefault(known,dict(appid=int(known),status='pending',excluded=True,manual=False))
+                owner.update(name=name,installed=True,origin='shortcut',shortcut_id=number,sgdb_id=-int(known))
+                self.catalog.save()
 
     def library(self,page=0,page_size=6,query='',filter='all'):
         games=sorted(self.catalog.games(),key=lambda g:(g.get('name','').casefold(),g['appid']))
