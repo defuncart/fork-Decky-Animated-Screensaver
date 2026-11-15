@@ -129,3 +129,29 @@ class ShortcutMergeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ShortcutRobustnessTests(unittest.TestCase):
+    def test_missing_final_end_marker_still_parses(self):
+        blob = shortcuts_blob(_i("appid", 5) + _s("AppName", "Heroic"))[:-1]
+        self.assertEqual(_read_binary_vdf(blob)["shortcuts"]["0"]["appname"], "Heroic")
+
+    def test_real_steam_layout_with_tags_and_flags(self):
+        entry = (_i("appid", -1234567) + _s("AppName", "Heroic") + _s("Exe", '"/usr/bin/heroic"') + _s("StartDir", "/usr/bin")
+                 + _s("icon", "") + _s("ShortcutPath", "") + _s("LaunchOptions", "") + _i("IsHidden", 0)
+                 + _i("AllowDesktopConfig", 1) + _i("OpenVR", 0) + _i("Devkit", 0) + _s("DevkitGameID", "")
+                 + _i("LastPlayTime", 1700000000) + _d("tags", _s("0", "favorite")))
+        self.assertEqual(_read_binary_vdf(shortcuts_blob(entry))["shortcuts"]["0"]["tags"]["0"], "favorite")
+
+
+class ShortcutScanSummaryTests(ShortcutMergeTests):
+    def test_summary_counts_and_missing_key_reason(self):
+        service = self.make([{"shortcut_id": 3000000001, "name": "Heroic", "last_played": 0},
+                             {"shortcut_id": 3000000002, "name": "Nope", "last_played": 0}], {"Heroic": 4242})
+        service.refresh_games()
+        self.assertEqual(service.status()["shortcut_scan"], dict(found=2, matched=1, unmatched=1, stopped=""))
+        service._request = lambda cb: (_ for _ in ()).throw(ScreensaverError("no key", "key_missing"))
+        service._shortcut_misses.clear(); service.catalog.data["games"].pop("-4242")
+        service.refresh_games()
+        self.assertEqual(service.shortcut_scan["stopped"], "key_missing")
+        self.assertEqual(service.shortcut_scan["matched"], 0)

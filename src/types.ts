@@ -137,6 +137,7 @@ export interface StudioState {
   missing_count?: number;
   excluded_count: number;
   key_configured: boolean;
+  shortcut_scan?: {found: number; matched: number; unmatched: number; stopped: string};
   connection: string;
   storage_bytes: number;
   warning?: string;

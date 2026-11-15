@@ -118,6 +118,9 @@ def _read_binary_vdf(data):
         result = {}
         while True:
             if pos >= size:
+                # Some writers omit the final end marker; keep what was read.
+                if depth == 0:
+                    return result, pos
                 raise ValueError("truncated")
             kind = data[pos]
             pos += 1

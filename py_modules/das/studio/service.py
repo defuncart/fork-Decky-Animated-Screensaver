@@ -83,7 +83,7 @@ class StudioService:
         self.provider=steamgriddb; self.current_game=current_game or (lambda:{})
         self.games_provider=games_provider or installed_games
         # A custom games_provider (tests, embedders) opts out of reading the real shortcuts.vdf.
-        self.shortcuts_provider=shortcuts_provider or (shortcut_games if games_provider is None else (lambda:[])); self._shortcut_misses=set(); self.compiler=media or Media()
+        self.shortcuts_provider=shortcuts_provider or (shortcut_games if games_provider is None else (lambda:[])); self._shortcut_misses=set(); self.shortcut_scan=dict(found=0,matched=0,unmatched=0,stopped=''); self.compiler=media or Media()
         self.event_callback=event_callback; self.thread=None; self.closed=False; self.cancelled=threading.Event()
         self._api_lock=threading.Lock(); self._api_at=0.; self._candidates=CandidateCache(); self._scanned=False
         self._pending_work=None; self.after_prepare=None; self.last_cleanup=None
@@ -168,7 +168,7 @@ class StudioService:
                 game_count=len(games),ready_count=sum(g['appid'] in self._ready and selected_game(g) and (g.get('animated') or self.catalog.options()['static_fallback'] or g.get('still_mode') in {'motion','fixed'}) for g in games),excluded_count=sum(bool(g.get('excluded')) for g in games),
                 included_count=len(included),failed_count=sum(g.get('status')=='error' for g in included),missing_count=sum(g.get('status')=='missing' for g in included),
                 issues_count=len(issues),issues=issues[:5],
-                key_configured=self._key_configured,connection=self._connection,job={**copy.deepcopy(self.job),'worker_active':self._busy()},options=self.catalog.options(),
+                key_configured=self._key_configured,connection=self._connection,shortcut_scan=dict(self.shortcut_scan),job={**copy.deepcopy(self.job),'worker_active':self._busy()},options=self.catalog.options(),
                 storage_bytes=self._usage,warning=self.catalog.warning,capabilities=self.compiler.capabilities())
 
     def refresh_games(self,include_new=True):
@@ -199,24 +199,29 @@ class StudioService:
         """Add non-Steam shortcuts as ``-sgdb_id`` entries tagged ``origin='shortcut'``.
 
         A shortcut's own id is kept as ``shortcut_id``; a match already stored for it is reused,
-        so SteamGridDB is only asked about shortcuts we have not matched yet.
+        so SteamGridDB is only asked about shortcuts we have not matched yet. The outcome is kept
+        in ``shortcut_scan`` (counts and a stop code only, never names) for the UI.
         """
+        scan=self.shortcut_scan=dict(found=0,matched=0,unmatched=0,stopped='')
         try: shortcuts=self.shortcuts_provider()
-        except Exception: return
-        if not shortcuts: return
+        except Exception: scan['stopped']='shortcuts_unreadable'; return
+        scan['found']=len(shortcuts or [])
         lookups=0
-        for shortcut in shortcuts:
+        for shortcut in shortcuts or []:
             number=shortcut['shortcut_id']; name=str(shortcut['name'])[:160]
             with self.catalog.lock:
                 known=next((k for k,e in self.catalog.data['games'].items() if e.get('shortcut_id')==number),None)
-                if known is None and (number in self._shortcut_misses or lookups>=self.SHORTCUT_LOOKUPS_PER_SCAN): continue
+            if known is None and number in self._shortcut_misses:
+                scan['unmatched']+=1; continue
+            if known is None and lookups>=self.SHORTCUT_LOOKUPS_PER_SCAN:
+                scan['stopped']=scan['stopped'] or 'lookup_limit'; continue
             if known is None:
                 lookups+=1
                 try: sgdb_id=self._resolve_shortcut(name)
                 except ScreensaverError as error:
                     # No key, offline or rate limited: stop asking this scan; the next scan retries.
-                    break
-                if not sgdb_id: self._shortcut_misses.add(number); continue
+                    scan['stopped']=error.code; break
+                if not sgdb_id: self._shortcut_misses.add(number); scan['unmatched']+=1; continue
                 known=str(-sgdb_id)
             with self.catalog.lock:
                 games=self.catalog.data['games']
@@ -226,6 +231,7 @@ class StudioService:
                     owner=games.setdefault(known,dict(appid=int(known),status='pending',excluded=True,manual=False))
                 owner.update(name=name,installed=True,origin='shortcut',shortcut_id=number,sgdb_id=-int(known))
                 self.catalog.save()
+            scan['matched']+=1
 
     def library(self,page=0,page_size=6,query='',filter='all'):
         games=sorted(self.catalog.games(),key=lambda g:(g.get('name','').casefold(),g['appid']))

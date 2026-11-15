@@ -439,6 +439,7 @@ export function CollectionStudio({initial='collection',focusUpdates=false,initia
     {loading&&!page.items.length&&<p role="status">{tr('Finding games…','Recherche des jeux…')}</p>}{grid()}{pagination()}
     {notice&&!loading&&actionButton(tr('Retry','Réessayer'),()=>void load(),'retry-discovery')}
     {!notice&&!loading&&!page.total&&ctx.query.trim().length>=3&&<div className="collection-empty"><p>{tr('No games found. Try another name.','Aucun jeu trouvé. Essayez un autre nom.')}</p>{actionButton(tr('Clear search','Effacer la recherche'),()=>setCtx({...ctx,query:'',page:0}),'clear-search')}</div>}
+    {ctx.source==='installed'&&s?.shortcut_scan&&<p role="status" data-shortcut-scan>{shortcutScanText(s.shortcut_scan,tr)}</p>}
     {ctx.source==='installed'&&actionButton(tr('Refresh installed games','Actualiser les jeux installés'),()=>void run('workspace_scan').then(()=>load()),'scan',saving)}
     </>;
   else content=<>{hero}<FaceplatePreparationStatus state={s}/>{faceplateRecovery()}
@@ -479,4 +480,14 @@ export function CollectionStudio({initial='collection',focusUpdates=false,initia
   return <Focusable ref={root} className="das collection-frame" flow-children="column" onCancel={cancel} onCancelActionDescription={tr('Back','Retour')}><style>{COLLECTION_CSS}</style>
     <div className="collection-tab-host">{nested?<>{bodyContent}</>:Tabs?<Tabs activeTab={tab} autoFocusContents={false} onShowTab={(id:string)=>navigate(id as CollectionTab)} tabs={(['collection','add','settings'] as CollectionTab[]).map(id=>({id,title:names()[id],content:id===tab?bodyContent:null}))}/>:<><p>{tr('Native tabs unavailable. Reopen the plugin.','Onglets natifs indisponibles. Rouvrez le plugin.')}</p></>}</div>
   </Focusable>;
+}
+
+function shortcutScanText(scan:{found:number;matched:number;unmatched:number;stopped:string},tr:(en:string,fr:string)=>string){
+  if(scan.stopped==='shortcuts_unreadable')return tr('Non-Steam games: could not read shortcuts.','Jeux hors Steam : lecture des raccourcis impossible.');
+  if(!scan.found)return tr('No non-Steam games found.','Aucun jeu hors Steam trouvé.');
+  const base=tr(`Non-Steam games: ${scan.found} found, ${scan.matched} matched`,`Jeux hors Steam : ${scan.found} trouvés, ${scan.matched} associés`);
+  if(scan.stopped==='key_missing')return base+tr(' · add your SteamGridDB key in Settings to match them.',' · ajoutez votre clé SteamGridDB dans les réglages.');
+  if(scan.stopped==='lookup_limit')return base+tr(' · refresh again to match more.',' · actualisez pour en associer davantage.');
+  if(scan.stopped)return base+tr(' · SteamGridDB unavailable, try again.',' · SteamGridDB indisponible, réessayez.');
+  return base+(scan.unmatched?tr(` · ${scan.unmatched} not found on SteamGridDB`,` · ${scan.unmatched} introuvables sur SteamGridDB`):'');
 }
